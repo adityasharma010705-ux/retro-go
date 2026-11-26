@@ -25,7 +25,7 @@ jobs:
           sed -i 's/"esp32-s3-devkit"/"esp32-s3-devkit", "my-s3-handheld"/g' rg_tool.py
           sed -i 's/RG_KEY_L2/RG_KEY_L/g; s/RG_KEY_R2/RG_KEY_OPTION/g' components/retro-go/targets/my-s3-handheld/config.h
           echo 'const char *rg_input_get_key_name(rg_key_t key) { return "KEY"; }' >> components/retro-go/rg_input.c
-          find . -name "partitions*.csv" -exec sed -i 's/1M/2M/g; s/0x100000/0x200000/g; s/1024K/2048K/g' {} +
+          find . -type f \( -name "*.csv" -o -name "*.py" -o -name "*sdkconfig*" \) -exec sed -i 's/0x100000/0x200000/g; s/1024K/2048K/g; s/, 1M/, 2M/g; s/,1M/,2M/g' {} +
           python3 rg_tool.py --target my-s3-handheld --no-networking release
 
       - name: Upload Compiled Firmware (.img)
