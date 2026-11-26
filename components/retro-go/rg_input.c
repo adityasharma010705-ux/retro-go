@@ -9,8 +9,6 @@
 #include <driver/gpio.h>
 #include <driver/adc.h>
 #include <driver/spi_master.h>
-// This is a lazy way to silence deprecation notices on some esp-idf versions...
-// This hardcoded value is the first thing to check if something stops working!
 #define ADC_ATTEN_DB_11 3
 
 #define TOUCH_CS_PIN   41
@@ -109,7 +107,7 @@ static rg_keymap_serial_t keymap_serial[] = RG_GAMEPAD_SERIAL_MAP;
 static rg_keymap_virt_t keymap_virt[] = RG_GAMEPAD_VIRT_MAP;
 #endif
 static bool input_task_running = false;
-static uint32_t gamepad_state = -1; // _Atomic
+static uint32_t gamepad_state = -1;
 static uint32_t gamepad_mapped = 0;
 static rg_battery_t battery_state = {0};
 
@@ -142,7 +140,7 @@ bool rg_input_read_battery_raw(rg_battery_t *out)
     bool present = true;
     bool charging = false;
 
-#if RG_BATTERY_DRIVER == 1 /* ADC */
+#if RG_BATTERY_DRIVER == 1
     for (int i = 0; i < 4; ++i)
     {
         int value = adc_get_raw(RG_BATTERY_ADC_UNIT, RG_BATTERY_ADC_CHANNEL);
@@ -151,7 +149,7 @@ bool rg_input_read_battery_raw(rg_battery_t *out)
         raw_value += esp_adc_cal_raw_to_voltage(value, &adc_chars);
     }
     raw_value /= 4;
-#elif RG_BATTERY_DRIVER == 2 /* I2C */
+#elif RG_BATTERY_DRIVER == 2
     uint8_t data[5];
     if (!rg_i2c_read(0x20, -1, &data, 5))
         return false;
@@ -279,7 +277,6 @@ static void input_task(void *arg)
     uint32_t state;
     int64_t next_battery_update = 0;
 
-    // Start the task with debounce history full to allow a button held during boot to be detected
     memset(debounce, 0xFF, sizeof(debounce));
     input_task_running = true;
 
@@ -294,11 +291,11 @@ static void input_task(void *arg)
 
                 if ((val & ((1 << RG_GAMEPAD_DEBOUNCE_PRESS) - 1)) == ((1 << RG_GAMEPAD_DEBOUNCE_PRESS) - 1))
                 {
-                    local_gamepad_state |= (1 << i); // Pressed
+                    local_gamepad_state |= (1 << i);
                 }
                 else if ((val & ((1 << RG_GAMEPAD_DEBOUNCE_RELEASE) - 1)) == 0)
                 {
-                    local_gamepad_state &= ~(1 << i); // Released
+                    local_gamepad_state &= ~(1 << i);
                 }
             }
             gamepad_state = local_gamepad_state;
@@ -315,7 +312,7 @@ static void input_task(void *arg)
                     temp.volts = battery_state.volts;
             }
             battery_state = temp;
-            next_battery_update = rg_system_timer() + 2 * 1000000; // update every 2 seconds
+            next_battery_update = rg_system_timer() + 2 * 1000000;
         }
 
         rg_task_delay(10);
@@ -352,14 +349,15 @@ void rg_input_init(void)
     for (size_t i = 0; i < RG_COUNT(keymap_gpio); ++i)
     {
         const rg_keymap_gpio_t *mapping = &keymap_gpio[i];
-gpio_set_direction(mapping->num, GPIO_MODE_INPUT);
-if (mapping->pullup)
-gpio_set_pull_mode(mapping->num, GPIO_PULLUP_ONLY);
-else if (mapping->pulldown)
-gpio_set_pull_mode(mapping->num, GPIO_PULLDOWN_ONLY);
-}
-UPDATE_GLOBAL_MAP(keymap_gpio);
+        gpio_set_direction(mapping->num, GPIO_MODE_INPUT);
+        if (mapping->pullup)
+            gpio_set_pull_mode(mapping->num, GPIO_PULLUP_ONLY);
+        else if (mapping->pulldown)
+            gpio_set_pull_mode(mapping->num, GPIO_PULLDOWN_ONLY);
+    }
+    UPDATE_GLOBAL_MAP(keymap_gpio);
 #endif
+
 #if defined(RG_GAMEPAD_I2C_MAP)
 RG_LOGI("Initializing I2C gamepad driver...");
 rg_i2c_init();
@@ -381,7 +379,6 @@ UPDATE_GLOBAL_MAP(keymap_serial);
 #if defined(RG_GAMEPAD_VIRT_MAP)
 UPDATE_GLOBAL_MAP(keymap_virt);
 #endif
-// Create the polling task
 rg_task_create("rg_input", &input_task, NULL, 2 * 1024, RG_TASK_PRIORITY_5, 1);
 while (!input_task_running)
 rg_task_delay(1);
@@ -420,34 +417,3 @@ rg_battery_t rg_input_read_battery(void)
 {
 return battery_state;
 }
-
-And here is the separate **single-block `.github/workflows/build.yml`** file to create right after you save `rg_input.c`:
-
-```yaml
-name: Build Retro-Go ESP32-S3
-
-on:
-  push:
-    branches: [ main, master ]
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    container:
-      image: espressif/idf:release-v5.1
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Build Retro-Go Firmware Image
-        run: |
-          python3 rg_tool.py --target my-s3-handheld build-img
-
-      - name: Upload Compiled Firmware (.img)
-        uses: actions/upload-artifact@v4
-        with:
-          name: retro-go-my-s3-handheld
-          path: "*.img"
