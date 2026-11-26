@@ -18,12 +18,12 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Configure S3 Target and ILI9488 Display
+      - name: Apply All ESP32-S3 Hardware, Display, Touch, and SD Fixes
         run: |
           git config --global --add safe.directory '*'
           . /opt/esp/idf/export.sh
 
-          # Create 16MB partition table with 2MB app slot
+          # 1. Create clean 16MB Flash partition table with 2MB app slots
           cat << 'EOF' > /opt/esp/idf/components/partition_table/partitions_singleapp.csv
           # Name,   Type, SubType, Offset,  Size, Flags
           nvs,      data, nvs,     0x9000,  0x6000,
@@ -31,16 +31,27 @@ jobs:
           factory,  app,  factory, 0x10000, 2M,
           EOF
 
-          # Register my-s3-handheld as an ESP32-S3 target
+          # 2. Register my-s3-handheld as an ESP32-S3 target
           sed -i 's/"esp32-s3-devkit"/"esp32-s3-devkit", "my-s3-handheld"/g' rg_tool.py
 
-          # Fix key names and helper
+          # 3. Fix button key names, SELECT pin (GPIO 3), and helper function
           sed -i 's/RG_KEY_L2/RG_KEY_L/g; s/RG_KEY_R2/RG_KEY_OPTION/g' components/retro-go/targets/my-s3-handheld/config.h
+          sed -i 's/GPIO_NUM_26/GPIO_NUM_3/g' components/retro-go/targets/my-s3-handheld/config.h
           grep -q "rg_input_get_key_name" components/retro-go/rg_input.c || echo 'const char *rg_input_get_key_name(rg_key_t key) { return "KEY"; }' >> components/retro-go/rg_input.c
 
-          # Enable ILI9488 18-bit SPI driver and safe 26MHz SPI clock for breadboard wires
+          # 4. Fix ILI9488 full-screen landscape rotation (RG_SCREEN_ROTATE 1) & crisp 20MHz SPI
           sed -i 's/#define RG_SCREEN_DRIVER.*/#define RG_SCREEN_DRIVER 1/g' components/retro-go/targets/my-s3-handheld/config.h
-          sed -i 's/SPI_MASTER_FREQ_40M/SPI_MASTER_FREQ_26M/g' components/retro-go/targets/my-s3-handheld/config.h
+          sed -i 's/#define RG_SCREEN_ROTATE.*/#define RG_SCREEN_ROTATE 1/g' components/retro-go/targets/my-s3-handheld/config.h
+          sed -i 's/SPI_MASTER_FREQ_40M/SPI_MASTER_FREQ_20M/g' components/retro-go/targets/my-s3-handheld/config.h
+
+          # 5. Move SD Card to dedicated SPI3_HOST (CS=38, MOSI=39, SCK=40, MISO=45) to stop SPI bus conflicts
+          sed -i 's/#define RG_STORAGE_SDSPI_HOST.*/#define RG_STORAGE_SDSPI_HOST SPI3_HOST/g' components/retro-go/targets/my-s3-handheld/config.h
+          sed -i 's/#define RG_GPIO_SDSPI_MOSI.*/#define RG_GPIO_SDSPI_MOSI GPIO_NUM_39/g' components/retro-go/targets/my-s3-handheld/config.h
+          sed -i 's/#define RG_GPIO_SDSPI_CLK.*/#define RG_GPIO_SDSPI_CLK GPIO_NUM_40/g' components/retro-go/targets/my-s3-handheld/config.h
+          sed -i 's/#define RG_GPIO_SDSPI_MISO.*/#define RG_GPIO_SDSPI_MISO GPIO_NUM_45/g' components/retro-go/targets/my-s3-handheld/config.h
+
+          # 6. Calibrate XPT2046 vertical touch axis (0xD0) for landscape screen
+          sed -i 's/xpt2046_read_axis(0x90)/xpt2046_read_axis(0xD0)/g' components/retro-go/rg_input.c
 
       - name: Compile Retro-Go Firmware (.img)
         run: |
