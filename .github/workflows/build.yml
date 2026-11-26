@@ -18,6 +18,8 @@ jobs:
 
       - name: Build Retro-Go Firmware Image
         run: |
+          git config --global --add safe.directory '*'
+          . /opt/esp/idf/export.sh
           python3 rg_tool.py --target my-s3-handheld build-img
 
       - name: Upload Compiled Firmware (.img)
