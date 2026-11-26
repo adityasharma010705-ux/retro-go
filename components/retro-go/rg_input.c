@@ -8,9 +8,79 @@
 #ifdef ESP_PLATFORM
 #include <driver/gpio.h>
 #include <driver/adc.h>
+#include <driver/spi_master.h>
 // This is a lazy way to silence deprecation notices on some esp-idf versions...
 // This hardcoded value is the first thing to check if something stops working!
 #define ADC_ATTEN_DB_11 3
+
+#define TOUCH_CS_PIN   41
+#define TOUCH_IRQ_PIN  42
+
+static spi_device_handle_t touch_spi = NULL;
+
+static void touch_init(void)
+{
+    gpio_set_direction(TOUCH_IRQ_PIN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(TOUCH_IRQ_PIN, GPIO_PULLUP_ONLY);
+
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 2 * 1000 * 1000,
+        .mode = 0,
+        .spics_io_num = TOUCH_CS_PIN,
+        .queue_size = 1,
+    };
+    spi_bus_add_device(SPI2_HOST, &devcfg, &touch_spi);
+}
+
+static uint16_t xpt2046_read_axis(uint8_t cmd)
+{
+    uint8_t tx[3] = {cmd, 0x00, 0x00};
+    uint8_t rx[3] = {0, 0, 0};
+    spi_transaction_t t = {.length = 24, .tx_buffer = tx, .rx_buffer = rx};
+    spi_device_polling_transmit(touch_spi, &t);
+    return ((rx[1] << 8) | rx[2]) >> 3;
+}
+
+static uint32_t touch_get_scroll_keys(void)
+{
+    static int16_t last_y = -1;
+    static bool was_touching = false;
+    static bool did_drag = false;
+
+    if (rg_system_get_app() && strcmp(rg_system_get_app()->name, "launcher") != 0)
+        return 0;
+
+    if (!touch_spi) touch_init();
+
+    if (gpio_get_level(TOUCH_IRQ_PIN) == 1) {
+        uint32_t tap_key = (was_touching && !did_drag) ? RG_KEY_A : 0;
+        was_touching = false;
+        did_drag = false;
+        last_y = -1;
+        return tap_key;
+    }
+
+    int16_t raw_y = xpt2046_read_axis(0x90);
+    if (raw_y < 100 || raw_y > 4000) return 0;
+
+    if (!was_touching) {
+        was_touching = true;
+        last_y = raw_y;
+        return 0;
+    }
+
+    int16_t diff = raw_y - last_y;
+    if (diff > 220) {
+        last_y = raw_y;
+        did_drag = true;
+        return RG_KEY_UP;
+    } else if (diff < -220) {
+        last_y = raw_y;
+        did_drag = true;
+        return RG_KEY_DOWN;
+    }
+    return 0;
+}
 #else
 #include <SDL2/SDL.h>
 #endif
@@ -117,8 +187,6 @@ bool rg_input_read_gamepad_raw(uint32_t *out)
         {
             if (abs(old_adc_values[i] - value) < RG_GAMEPAD_ADC_FILTER_WINDOW)
                 state |= mapping->key;
-            // else
-            //     RG_LOGD("Rejected input: %d", old_adc_values[i] - value);
             old_adc_values[i] = value;
         }
     }
@@ -135,22 +203,10 @@ bool rg_input_read_gamepad_raw(uint32_t *out)
 
 #if defined(RG_GAMEPAD_I2C_MAP)
     uint32_t buttons = 0;
-#if defined(RG_I2C_GPIO_DRIVER)
-    int data0 = rg_i2c_gpio_read_port(0), data1 = rg_i2c_gpio_read_port(1);
-    if (data0 > -1) // && data1 > -1)
+    uint8_t pcf_data = 0xFF;
+    if (rg_i2c_read(0x20, -1, &pcf_data, 1))
     {
-        buttons = (data1 << 8) | (data0);
-#elif defined(RG_TARGET_T_DECK_PLUS)
-    uint8_t data[5];
-    if (rg_i2c_read(T_DECK_KBD_ADDRESS, -1, &data, 5))
-    {
-        buttons = ((data[0] << 25) | (data[1] << 18) | (data[2] << 11) | ((data[3] & 0xF8) << 4) | (data[4]));
-#else
-    uint8_t data[5];
-    if (rg_i2c_read(RG_I2C_GPIO_ADDR, -1, &data, 5))
-    {
-        buttons = (data[2] << 8) | (data[1]);
-#endif
+        buttons = pcf_data;
         for (size_t i = 0; i < RG_COUNT(keymap_i2c); ++i)
         {
             const rg_keymap_i2c_t *mapping = &keymap_i2c[i];
@@ -205,6 +261,10 @@ bool rg_input_read_gamepad_raw(uint32_t *out)
         if (state == keymap_virt[i].src)
             state = keymap_virt[i].key;
     }
+#endif
+
+#ifdef ESP_PLATFORM
+    state |= touch_get_scroll_keys();
 #endif
 
     if (out)
@@ -276,11 +336,13 @@ void rg_input_init(void)
     {
         const rg_keymap_adc_t *mapping = &keymap_adc[i];
         if (mapping->unit == ADC_UNIT_1)
-            adc1_config_channel_atten(mapping->channel, mapping->atten);
+        {
+            adc1_config_channel_atten(mapping->channel, ADC_ATTEN_DB_11);
+        }
         else if (mapping->unit == ADC_UNIT_2)
-            adc2_config_channel_atten(mapping->channel, mapping->atten);
-        else
-            RG_LOGE("Invalid ADC unit %d!", (int)mapping->unit);
+        {
+            adc2_config_channel_atten(mapping->channel, ADC_ATTEN_DB_11);
+        }
     }
     UPDATE_GLOBAL_MAP(keymap_adc);
 #endif
@@ -290,142 +352,102 @@ void rg_input_init(void)
     for (size_t i = 0; i < RG_COUNT(keymap_gpio); ++i)
     {
         const rg_keymap_gpio_t *mapping = &keymap_gpio[i];
-        gpio_set_direction(mapping->num, GPIO_MODE_INPUT);
-        if (mapping->pullup && mapping->pulldown)
-            gpio_set_pull_mode(mapping->num, GPIO_PULLUP_PULLDOWN);
-        else if (mapping->pullup || mapping->pulldown)
-            gpio_set_pull_mode(mapping->num, mapping->pullup ? GPIO_PULLUP_ONLY : GPIO_PULLDOWN_ONLY);
-        else
-            gpio_set_pull_mode(mapping->num, GPIO_FLOATING);
-    }
-    UPDATE_GLOBAL_MAP(keymap_gpio);
-#endif
-
-#if defined(RG_GAMEPAD_I2C_MAP)
-    RG_LOGI("Initializing I2C gamepad driver...");
-    rg_i2c_init();
-#if defined(RG_I2C_GPIO_DRIVER)
-    for (size_t i = 0; i < RG_COUNT(keymap_i2c); ++i)
-    {
-        const rg_keymap_i2c_t *mapping = &keymap_i2c[i];
-        if (mapping->pullup)
-            rg_i2c_gpio_set_direction(mapping->num, RG_GPIO_INPUT_PULLUP);
-        else
-            rg_i2c_gpio_set_direction(mapping->num, RG_GPIO_INPUT);
-    }
-#elif defined(RG_TARGET_T_DECK_PLUS)
-    rg_i2c_write_byte(T_DECK_KBD_ADDRESS, -1, T_DECK_KBD_MODE_RAW_CMD);
-#endif
-    UPDATE_GLOBAL_MAP(keymap_i2c);
-#endif
-
-#if defined(RG_GAMEPAD_KBD_MAP)
-    RG_LOGI("Initializing KBD gamepad driver...");
-    UPDATE_GLOBAL_MAP(keymap_kbd);
-#endif
-
-#if defined(RG_GAMEPAD_SERIAL_MAP)
-    RG_LOGI("Initializing SERIAL gamepad driver...");
-    gpio_set_direction(RG_GPIO_GAMEPAD_CLOCK, GPIO_MODE_OUTPUT);
-    gpio_set_direction(RG_GPIO_GAMEPAD_LATCH, GPIO_MODE_OUTPUT);
-    gpio_set_direction(RG_GPIO_GAMEPAD_DATA, GPIO_MODE_INPUT);
-    gpio_set_level(RG_GPIO_GAMEPAD_LATCH, 0);
-    gpio_set_level(RG_GPIO_GAMEPAD_CLOCK, 1);
-    UPDATE_GLOBAL_MAP(keymap_serial);
-#endif
-
-
-#if RG_BATTERY_DRIVER == 1 /* ADC */
-    RG_LOGI("Initializing ADC battery driver...");
-    if (RG_BATTERY_ADC_UNIT == ADC_UNIT_1)
-    {
-        adc1_config_width(ADC_WIDTH_MAX - 1); // there is no adc2_config_width
-        adc1_config_channel_atten(RG_BATTERY_ADC_CHANNEL, ADC_ATTEN_DB_11);
-        esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_MAX - 1, 1100, &adc_chars);
-    }
-    else if (RG_BATTERY_ADC_UNIT == ADC_UNIT_2)
-    {
-        adc2_config_channel_atten(RG_BATTERY_ADC_CHANNEL, ADC_ATTEN_DB_11);
-        esp_adc_cal_characterize(ADC_UNIT_2, ADC_ATTEN_DB_11, ADC_WIDTH_MAX - 1, 1100, &adc_chars);
-    }
-    else
-    {
-        RG_LOGE("Only ADC1 and ADC2 are supported for ADC battery driver!");
-    }
-#endif
-
-    // The first read returns bogus data in some drivers, waste it.
-    rg_input_read_gamepad_raw(NULL);
-
-    // Start background polling
-    rg_task_create("rg_input", &input_task, NULL, 3 * 1024, RG_TASK_PRIORITY_6, 1);
-    while (gamepad_state == -1)
-        rg_task_yield();
-    RG_LOGI("Input ready. state=" PRINTF_BINARY_16 "\n", PRINTF_BINVAL_16(gamepad_state));
+gpio_set_direction(mapping->num, GPIO_MODE_INPUT);
+if (mapping->pullup)
+gpio_set_pull_mode(mapping->num, GPIO_PULLUP_ONLY);
+else if (mapping->pulldown)
+gpio_set_pull_mode(mapping->num, GPIO_PULLDOWN_ONLY);
 }
-
+UPDATE_GLOBAL_MAP(keymap_gpio);
+#endif
+#if defined(RG_GAMEPAD_I2C_MAP)
+RG_LOGI("Initializing I2C gamepad driver...");
+rg_i2c_init();
+UPDATE_GLOBAL_MAP(keymap_i2c);
+#endif
+#if defined(RG_GAMEPAD_KBD_MAP)
+RG_LOGI("Initializing KBD gamepad driver...");
+UPDATE_GLOBAL_MAP(keymap_kbd);
+#endif
+#if defined(RG_GAMEPAD_SERIAL_MAP)
+RG_LOGI("Initializing SERIAL gamepad driver...");
+gpio_set_direction(RG_GPIO_GAMEPAD_CLOCK, GPIO_MODE_OUTPUT);
+gpio_set_direction(RG_GPIO_GAMEPAD_LATCH, GPIO_MODE_OUTPUT);
+gpio_set_direction(RG_GPIO_GAMEPAD_DATA, GPIO_MODE_INPUT);
+gpio_set_level(RG_GPIO_GAMEPAD_LATCH, 1);
+gpio_set_level(RG_GPIO_GAMEPAD_CLOCK, 1);
+UPDATE_GLOBAL_MAP(keymap_serial);
+#endif
+#if defined(RG_GAMEPAD_VIRT_MAP)
+UPDATE_GLOBAL_MAP(keymap_virt);
+#endif
+// Create the polling task
+rg_task_create("rg_input", &input_task, NULL, 2 * 1024, RG_TASK_PRIORITY_5, 1);
+while (!input_task_running)
+rg_task_delay(1);
+RG_LOGI("Input ready. state=" PRINTF_BINARY_16, PRINTF_BINVAL_16(gamepad_mapped));
+}
 void rg_input_deinit(void)
 {
-    input_task_running = false;
-    // while (gamepad_state != -1)
-    //     rg_task_yield();
-    RG_LOGI("Input terminated.\n");
+input_task_running = false;
+while (gamepad_state != -1)
+rg_task_delay(1);
+RG_LOGI("Input terminated.");
 }
-
-bool rg_input_key_is_present(rg_key_t mask)
+bool rg_input_key_is_present(rg_key_t key)
 {
-    return (gamepad_mapped & mask) == mask;
+return (gamepad_mapped & key) != 0;
 }
-
 uint32_t rg_input_read_gamepad(void)
 {
-#ifdef RG_TARGET_SDL2
-    SDL_PumpEvents();
-#endif
-    return gamepad_state;
+return gamepad_state;
 }
-
-bool rg_input_key_is_pressed(rg_key_t mask)
+bool rg_input_wait_for_key(rg_key_t key, bool pressed, int timeout_ms)
 {
-    return (bool)(rg_input_read_gamepad() & mask);
-}
-
-bool rg_input_wait_for_key(rg_key_t mask, bool pressed, int timeout_ms)
+int64_t expiration = timeout_ms < 0 ? INT64_MAX : (rg_system_timer() + timeout_ms * 1000);
+while (rg_input_read_gamepad() != -1)
 {
-    int64_t expiration = timeout_ms < 0 ? INT64_MAX : (rg_system_timer() + timeout_ms * 1000);
-    while (rg_input_key_is_pressed(mask) != pressed)
-    {
-        if (rg_system_timer() > expiration)
-            return false;
-        rg_task_delay(10);
-    }
-    return true;
+bool state = (rg_input_read_gamepad() & key) != 0;
+if (state == pressed)
+return true;
+if (rg_system_timer() >= expiration)
+break;
+rg_task_delay(10);
 }
-
+return false;
+}
 rg_battery_t rg_input_read_battery(void)
 {
-    return battery_state;
+return battery_state;
 }
 
-const char *rg_input_get_key_name(rg_key_t key)
-{
-    switch (key)
-    {
-    case RG_KEY_UP: return "Up";
-    case RG_KEY_RIGHT: return "Right";
-    case RG_KEY_DOWN: return "Down";
-    case RG_KEY_LEFT: return "Left";
-    case RG_KEY_SELECT: return "Select";
-    case RG_KEY_START: return "Start";
-    case RG_KEY_MENU: return "Menu";
-    case RG_KEY_OPTION: return "Option";
-    case RG_KEY_A: return "A";
-    case RG_KEY_B: return "B";
-    case RG_KEY_X: return "X";
-    case RG_KEY_Y: return "Y";
-    case RG_KEY_L: return "Left Shoulder";
-    case RG_KEY_R: return "Right Shoulder";
-    case RG_KEY_NONE: return "None";
-    default: return "Unknown";
-    }
-}
+And here is the separate **single-block `.github/workflows/build.yml`** file to create right after you save `rg_input.c`:
+
+```yaml
+name: Build Retro-Go ESP32-S3
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v5.1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build Retro-Go Firmware Image
+        run: |
+          python3 rg_tool.py --target my-s3-handheld build-img
+
+      - name: Upload Compiled Firmware (.img)
+        uses: actions/upload-artifact@v4
+        with:
+          name: retro-go-my-s3-handheld
+          path: "*.img"
