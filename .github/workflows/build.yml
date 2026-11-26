@@ -20,7 +20,10 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           . /opt/esp/idf/export.sh
-          for d in launcher retro-core prboom-go gwenesis fmsx; do cp components/retro-go/targets/my-s3-handheld/sdkconfig.defaults $d/sdkconfig.defaults; done
+          for d in launcher retro-core prboom-go gwenesis fmsx; do
+            cp components/retro-go/targets/my-s3-handheld/sdkconfig.defaults $d/sdkconfig.defaults
+            (cd $d && idf.py set-target esp32s3)
+          done
           python3 rg_tool.py --target my-s3-handheld release
 
       - name: Upload Compiled Firmware (.img)
