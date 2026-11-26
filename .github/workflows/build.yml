@@ -10,20 +10,19 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:release-v5.1
+    env:
+      IDF_TARGET: esp32s3
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Build Retro-Go Firmware Image
+      - name: Configure S3 Target and Build Firmware
         run: |
           git config --global --add safe.directory '*'
           . /opt/esp/idf/export.sh
-          for d in launcher retro-core prboom-go gwenesis fmsx; do
-            cp components/retro-go/targets/my-s3-handheld/sdkconfig.defaults $d/sdkconfig.defaults
-            (cd $d && idf.py set-target esp32s3)
-          done
+          sed -i 's/"esp32-s3-devkit"/"esp32-s3-devkit", "my-s3-handheld"/g' rg_tool.py
           python3 rg_tool.py --target my-s3-handheld release
 
       - name: Upload Compiled Firmware (.img)
