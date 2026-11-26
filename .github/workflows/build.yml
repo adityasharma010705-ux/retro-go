@@ -24,7 +24,7 @@ jobs:
           . /opt/esp/idf/export.sh
           sed -i 's/"esp32-s3-devkit"/"esp32-s3-devkit", "my-s3-handheld"/g' rg_tool.py
           sed -i 's/RG_KEY_L2/RG_KEY_L/g; s/RG_KEY_R2/RG_KEY_OPTION/g' components/retro-go/targets/my-s3-handheld/config.h
-          python3 rg_tool.py --target my-s3-handheld release
+          python3 rg_tool.py --target my-s3-handheld --no-networking release
 
       - name: Upload Compiled Firmware (.img)
         uses: actions/upload-artifact@v4
